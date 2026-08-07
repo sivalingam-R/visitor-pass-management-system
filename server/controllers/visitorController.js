@@ -2,6 +2,14 @@ const Visitor = require("../models/Visitor")
 const User = require("../models/User")
 const ActivityLog = require("../models/ActivityLog")
 
+const logActivity = async (visitorId, action, performedBy) => {
+  await ActivityLog.create({
+    visitorId,
+    action,
+    performedBy,
+  })
+}
+
 const createVisitor = async (req, res) => {
   try {
     const {
@@ -70,12 +78,10 @@ const createVisitor = async (req, res) => {
       expectedArrivalTime,
     });
 
-    await ActivityLog.create({
-     visitorId: visitor._id,
-     action: "Created",
-    })
+    await logActivity(visitor._id, "Created", req.user.id);
 
-    res.status(201).json(visitor);
+    const populated = await Visitor.findById(visitor._id).populate("employeeId", "name email");
+    res.status(201).json(populated);
   } catch (error) {
     console.log(error);
 
@@ -85,44 +91,34 @@ const createVisitor = async (req, res) => {
   }
 };
 
+const getAllVisitors = async (req, res) => {
+  try {
+    const visitors = await Visitor.find({ status: { $ne: "Cancelled" } })
+      .populate("employeeId", "name email")
+      .sort({ createdAt: -1 });
+
+    res.status(200).json(visitors);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getMyRequests = async (req, res) => {
+  try {
+    const visitors = await Visitor.find({ employeeId: req.user.id })
+      .populate("employeeId", "name email")
+      .sort({ createdAt: -1 });
+
+    res.status(200).json(visitors);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const approveVisitor = async (req, res) => {
   try {
-    const { id } = req.params
-
-    const visitor = await Visitor.findById(id)
-
-    if (!visitor) {
-      return res.status(404).json({
-        message: "Visitor not found",
-      })
-    }
-
-    if (visitor.status !== "Pending") {
-      return res.status(400).json({
-        message: "Visitor cannot be approved",
-      })
-    }
-
-    visitor.status = "Approved"
-
-    await visitor.save()
-
-    await ActivityLog.create({
-       visitorId: visitor._id,
-       action: "Approved",
-      })
-
-    res.status(200).json(visitor)
-  } catch (error) {
-    res.status(500).json({
-      message: error.message,
-    })
-  }
-}
-
-const rejectVisitor = async (req, res) => {
-  try {
     const { id } = req.params;
+    const { remarks } = req.body;
 
     const visitor = await Visitor.findById(id);
 
@@ -132,6 +128,48 @@ const rejectVisitor = async (req, res) => {
       });
     }
 
+    if (visitor.employeeId.toString() !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    if (visitor.status !== "Pending") {
+      return res.status(400).json({
+        message: "Visitor cannot be approved",
+      });
+    }
+
+    visitor.status = "Approved";
+    if (remarks) visitor.remarks = remarks;
+
+    await visitor.save();
+    await logActivity(visitor._id, "Approved", req.user.id);
+
+    const populated = await Visitor.findById(visitor._id).populate("employeeId", "name email");
+    res.status(200).json(populated);
+  } catch (error) {
+    res.status(500).json({
+      message: error.message,
+    });
+  }
+};
+
+const rejectVisitor = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { remarks } = req.body;
+
+    const visitor = await Visitor.findById(id);
+
+    if (!visitor) {
+      return res.status(404).json({
+        message: "Visitor not found",
+      });
+    }
+
+    if (visitor.employeeId.toString() !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
     if (visitor.status !== "Pending") {
       return res.status(400).json({
         message: "Visitor cannot be rejected",
@@ -139,15 +177,13 @@ const rejectVisitor = async (req, res) => {
     }
 
     visitor.status = "Rejected";
+    if (remarks) visitor.remarks = remarks;
 
     await visitor.save();
+    await logActivity(visitor._id, "Rejected", req.user.id);
 
-    await ActivityLog.create({
-       visitorId: visitor._id,
-       action: "Rejected",
-      })
-
-    res.status(200).json(visitor);
+    const populated = await Visitor.findById(visitor._id).populate("employeeId", "name email");
+    res.status(200).json(populated);
   } catch (error) {
     res.status(500).json({
       message: error.message,
@@ -183,13 +219,10 @@ const checkInVisitor = async (req, res) => {
     visitor.checkInTime = new Date();
 
     await visitor.save();
+    await logActivity(visitor._id, "CheckedIn", req.user.id);
 
-    await ActivityLog.create({
-       visitorId: visitor._id,
-       action: "CheckedIn",
-      })
-
-    res.status(200).json(visitor);
+    const populated = await Visitor.findById(visitor._id).populate("employeeId", "name email");
+    res.status(200).json(populated);
   } catch (error) {
     res.status(500).json({
       message: error.message,
@@ -219,12 +252,10 @@ const checkOutVisitor = async (req, res) => {
     visitor.checkOutTime = new Date();
 
     await visitor.save();
+    await logActivity(visitor._id, "CheckedOut", req.user.id);
 
-    await ActivityLog.create({
-       visitorId: visitor._id,
-       action: "CheckedOut",
-    })
-    res.status(200).json(visitor);
+    const populated = await Visitor.findById(visitor._id).populate("employeeId", "name email");
+    res.status(200).json(populated);
   } catch (error) {
     res.status(500).json({
       message: error.message,
@@ -232,36 +263,75 @@ const checkOutVisitor = async (req, res) => {
   }
 };
 
+const cancelVisitor = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const visitor = await Visitor.findById(id);
+
+    if (!visitor) {
+      return res.status(404).json({ message: "Visitor not found" });
+    }
+
+    if (visitor.status === "CheckedOut") {
+      return res.status(400).json({ message: "Checked out visits cannot be cancelled" });
+    }
+
+    if (visitor.status === "Cancelled") {
+      return res.status(400).json({ message: "Visit is already cancelled" });
+    }
+
+    visitor.status = "Cancelled";
+    await visitor.save();
+    await logActivity(visitor._id, "Cancelled", req.user.id);
+
+    const populated = await Visitor.findById(visitor._id).populate("employeeId", "name email");
+    res.status(200).json(populated);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const searchVisitors = async (req, res) => {
   try {
-    const { visitorName, status, visitDate } = req.query
+    const { visitorName, employeeId, status, visitDate } = req.query;
 
-    const filter = {}
+    const filter = { status: { $ne: "Cancelled" } };
 
     if (visitorName) {
       filter.visitorName = {
         $regex: visitorName,
         $options: "i",
-      }
+      };
+    }
+
+    if (employeeId) {
+      filter.employeeId = employeeId;
     }
 
     if (status) {
-      filter.status = status
+      filter.status = status;
     }
 
     if (visitDate) {
-      filter.visitDate = new Date(visitDate)
+      const start = new Date(visitDate);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(visitDate);
+      end.setHours(23, 59, 59, 999);
+      filter.visitDate = { $gte: start, $lte: end };
     }
 
     const visitors = await Visitor.find(filter)
+      .populate("employeeId", "name email")
+      .sort({ createdAt: -1 });
 
-    res.status(200).json(visitors)
+    res.status(200).json(visitors);
   } catch (error) {
     res.status(500).json({
       message: error.message,
-    })
+    });
   }
-}
+};
 
 const getVisitorReports = async (req, res) => {
   try {
@@ -270,16 +340,30 @@ const getVisitorReports = async (req, res) => {
     let filter = {};
 
     if (startDate && endDate) {
+      const start = new Date(startDate);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
       filter.visitDate = {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
+        $gte: start,
+        $lte: end,
       };
     }
 
-    const visitors = await Visitor.find(filter);
+    const visitors = await Visitor.find(filter)
+      .populate("employeeId", "name email")
+      .sort({ visitDate: -1 });
+
+    const countByStatus = (s) => visitors.filter((v) => v.status === s).length;
 
     res.status(200).json({
       totalVisitors: visitors.length,
+      pending: countByStatus("Pending"),
+      approved: countByStatus("Approved"),
+      rejected: countByStatus("Rejected"),
+      checkedIn: countByStatus("CheckedIn"),
+      checkedOut: countByStatus("CheckedOut"),
+      cancelled: countByStatus("Cancelled"),
       visitors,
     });
   } catch (error) {
@@ -289,12 +373,28 @@ const getVisitorReports = async (req, res) => {
   }
 };
 
+const getVisitorActivity = async (req, res) => {
+  try {
+    const logs = await ActivityLog.find({ visitorId: req.params.id })
+      .populate("performedBy", "name email role")
+      .sort({ timestamp: 1 });
+
+    res.status(200).json(logs);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   createVisitor,
+  getAllVisitors,
+  getMyRequests,
   approveVisitor,
   rejectVisitor,
   getVisitorReports,
   searchVisitors,
   checkInVisitor,
   checkOutVisitor,
-}
+  cancelVisitor,
+  getVisitorActivity,
+};
